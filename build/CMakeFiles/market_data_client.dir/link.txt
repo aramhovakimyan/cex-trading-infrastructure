@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/market_data_client.dir/src/market_data/main.cpp.o CMakeFiles/market_data_client.dir/src/market_data/market_data_parser.cpp.o CMakeFiles/market_data_client.dir/src/market_data/order_book.cpp.o -o market_data_client  /usr/lib/x86_64-linux-gnu/libboost_system.so.1.83.0 /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so 

@@ -1,0 +1,3 @@
+/home/aram/CLionProjects/cex-trading-infrastructure/build/CMakeFiles/market_data_client.dir
+/home/aram/CLionProjects/cex-trading-infrastructure/build/CMakeFiles/edit_cache.dir
+/home/aram/CLionProjects/cex-trading-infrastructure/build/CMakeFiles/rebuild_cache.dir
