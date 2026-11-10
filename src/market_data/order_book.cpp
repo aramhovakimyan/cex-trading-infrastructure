@@ -1,52 +1,117 @@
+
 #include "market_data/order_book.hpp"
 
 #include <stdexcept>
+#include <utility>
 
 namespace trading {
 
-void OrderBook::update(const MarketDataEvent& event) {
-    std::lock_guard<std::mutex> lock(mutex_);
+OrderBook::OrderBook(std::string symbol)
+    : symbol_(std::move(symbol)) {}
 
-    if (snapshot_ &&
-        event.symbol == snapshot_->symbol &&
-        event.update_id != 0 &&
-        snapshot_->update_id != 0 &&
-        event.update_id < snapshot_->update_id) {
-        return;
+void OrderBook::load_snapshot(
+    const DepthSnapshot& snapshot
+) {
+    if (snapshot.symbol != symbol_) {
+        throw std::invalid_argument("Snapshot symbol mismatch");
     }
 
-    snapshot_ = event;
+    bids_.clear();
+    asks_.clear();
+
+    apply_levels(bids_, snapshot.bids);
+    apply_levels(asks_, snapshot.asks);
+
+    last_update_id_ = snapshot.last_update_id;
+    synchronized_ = true;
 }
 
-std::optional<MarketDataEvent>
-OrderBook::get_snapshot() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    return snapshot_;
-}
-
-double OrderBook::spread() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!snapshot_) {
-        return 0.0;
+UpdateResult OrderBook::apply_update(
+    const DepthUpdate& update
+) {
+    if (update.symbol != symbol_) {
+        return UpdateResult::InvalidSymbol;
     }
 
-    return snapshot_->ask_price -
-           snapshot_->bid_price;
-}
-
-double OrderBook::midpoint() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!snapshot_) {
-        return 0.0;
+    if (!synchronized_) {
+        return UpdateResult::Ignored;
     }
 
-    return (
-        snapshot_->ask_price +
-        snapshot_->bid_price
-    ) / 2.0;
+    // Ignore updates already covered by the book.
+    if (update.final_update_id <= last_update_id_) {
+        return UpdateResult::Ignored;
+    }
+
+    // A missing update means our local book is unreliable.
+    if (update.first_update_id > last_update_id_ + 1) {
+        synchronized_ = false;
+        return UpdateResult::GapDetected;
+    }
+
+    apply_levels(bids_, update.bids);
+    apply_levels(asks_, update.asks);
+
+    last_update_id_ = update.final_update_id;
+
+    return UpdateResult::Applied;
+}
+
+void OrderBook::apply_levels(
+    std::map<Price, Quantity, std::greater<>>& book,
+    const std::vector<PriceLevel>& levels
+) {
+    for (const auto& level : levels) {
+        if (level.quantity == 0) {
+            book.erase(level.price);
+        } else {
+            book[level.price] = level.quantity;
+        }
+    }
+}
+
+void OrderBook::apply_levels(
+    std::map<Price, Quantity>& book,
+    const std::vector<PriceLevel>& levels
+) {
+    for (const auto& level : levels) {
+        if (level.quantity == 0) {
+            book.erase(level.price);
+        } else {
+            book[level.price] = level.quantity;
+        }
+    }
+}
+
+std::uint64_t OrderBook::last_update_id() const {
+    return last_update_id_;
+}
+
+Price OrderBook::best_bid() const {
+    return bids_.empty() ? 0 : bids_.begin()->first;
+}
+
+Price OrderBook::best_ask() const {
+    return asks_.empty() ? 0 : asks_.begin()->first;
+}
+
+Quantity OrderBook::best_bid_quantity() const {
+    return bids_.empty() ? 0 : bids_.begin()->second;
+}
+
+Quantity OrderBook::best_ask_quantity() const {
+    return asks_.empty() ? 0 : asks_.begin()->second;
+}
+
+std::size_t OrderBook::bid_levels() const {
+    return bids_.size();
+}
+
+std::size_t OrderBook::ask_levels() const {
+    return asks_.size();
+}
+
+bool OrderBook::synchronized() const {
+    return synchronized_;
 }
 
 }

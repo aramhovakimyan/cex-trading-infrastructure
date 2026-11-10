@@ -2,17 +2,24 @@
 #include <boost/asio/ssl.hpp>
 #include <boost/beast.hpp>
 #include <boost/beast/ssl.hpp>
+#include <curl/curl.h>
 
 #include <nlohmann/json.hpp>
 
 #include "market_data/market_data_parser.hpp"
 #include "market_data/order_book.hpp"
+#include "market_data/depth_parser.hpp"
+#include "market_data/depth_synchronizer.hpp"
+#include "market_data/bounded_queue.hpp"
 
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <atomic>
+#include <thread>
+#include <utility>
 
 namespace net = boost::asio;
 namespace beast = boost::beast;
@@ -34,28 +41,18 @@ public:
         ssl_context_.set_verify_mode(ssl::verify_peer);
     }
 
-    
-    void run() {
-     const std::string host =
-        "stream.testnet.binance.vision";
+    void connect() {
+        const std::string host = "stream.testnet.binance.vision";
+        const std::string port = "9443";
+        const std::string target = "/ws/btcusdt@depth@100ms";
 
-    const std::string port = "9443";
+        auto endpoints = resolver_.resolve(host, port);
 
-    const std::string target =
-        "/ws/btcusdt@bookTicker";
-
-    try {
-        auto const endpoints =
-            resolver_.resolve(host, port);
-
-        // Establish TCP connection
         beast::get_lowest_layer(ws_).connect(endpoints);
 
-        // Configure TLS hostname verification
         if (!SSL_set_tlsext_host_name(
                 ws_.next_layer().native_handle(),
                 host.c_str())) {
-
             throw beast::system_error(
                 beast::error_code(
                     static_cast<int>(::ERR_get_error()),
@@ -64,93 +61,101 @@ public:
             );
         }
 
-        // Verify server certificate
         ws_.next_layer().set_verify_callback(
             ssl::host_name_verification(host)
         );
 
-        // TLS handshake
-        ws_.next_layer().handshake(
-            ssl::stream_base::client
-        );
+        ws_.next_layer().handshake(ssl::stream_base::client);
 
-        // WebSocket handshake
-        ws_.handshake(
-            host + ":" + port,
-            target
-        );
+        ws_.handshake(host + ":" + port, target);
 
-        std::cout
-            << "Connected to Binance Testnet\n";
-
-        listen();
-
-    } catch (const std::exception& e) {
-        std::cerr
-            << "Connection error: "
-            << e.what() << '\n';
+        std::cout << "Connected to Binance depth stream\n";
     }
-}
 
-private:
-    void listen() {
+    void listen(
+    trading::BoundedQueue<trading::DepthUpdate>& updates,
+    std::atomic<bool>& overflowed) {
+
         beast::flat_buffer buffer;
 
-        while (true) {
-            buffer.clear();
+        try {
+            while (true) {
+                buffer.clear();
+                ws_.read(buffer);
 
-            ws_.read(buffer);
+                const std::string message =
+                    beast::buffers_to_string(buffer.data());
 
-            const std::string message =
-                beast::buffers_to_string(buffer.data());
+                auto update =
+                    trading::DepthParser::parse_update(message);
 
-            process_message(message);
+                if (!update) {
+                    continue;
+                }
+
+                if (!updates.try_push(std::move(*update))) {
+                    overflowed.store(true);
+                    std::cerr << "Depth update queue is full!\n";
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "WebSocket reader stopped: "
+                      << e.what() << '\n';
         }
+
+        updates.close();
+
+        std::cout << "WebSocket reader stopped.\n";
     }
 
-    void process_message(const std::string& message) {
-        auto event =
-            trading::MarketDataParser::parse_book_ticker(
-                message
-            );
-
-        if (!event) {
-            std::cerr << "Invalid market data message\n";
-            return;
-        }
-
-        order_book_.update(*event);
-
-        const auto snapshot =
-            order_book_.get_snapshot();
-
-        if (!snapshot) {
-            return;
-        }
-
-        const double spread = order_book_.spread();
-        const double midpoint = order_book_.midpoint();
-
-        std::cout
-            << snapshot->symbol
-            << " | Bid: " << snapshot->bid_price
-            << " | Ask: " << snapshot->ask_price
-            << " | Spread: " << spread
-            << " | Midpoint: " << midpoint
-            << '\n';
-    }
-
+private:
     net::io_context ioc_;
     ssl::context ssl_context_;
     tcp::resolver resolver_;
     websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
-    trading::OrderBook order_book_;
 };
 
 int main() {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    constexpr std::size_t queue_capacity = 100'000;
+
+    trading::BoundedQueue<trading::DepthUpdate> updates(
+        queue_capacity
+    );
+
+    std::atomic<bool> overflowed{false};
+
+    trading::OrderBook order_book("BTCUSDT");
+
     BinanceMarketDataClient client;
 
-    client.run();
+    try {
+        // 1. Connect to Binance before starting the reader.
+        client.connect();
+
+        // 2. Start receiving and buffering depth updates.
+        std::thread websocket_thread([&] {
+            client.listen(updates, overflowed);
+        });
+
+        // 3. Fetch the REST snapshot and synchronize the book.
+        trading::DepthSynchronizer synchronizer(
+            "BTCUSDT",
+            updates,
+            overflowed,
+            order_book
+        );
+
+        synchronizer.run();
+
+        websocket_thread.join();
+    } catch (const std::exception& e) {
+        std::cerr << "Application error: "
+                  << e.what() << '\n';
+    }
+
+    curl_global_cleanup();
 
     return EXIT_SUCCESS;
 }
