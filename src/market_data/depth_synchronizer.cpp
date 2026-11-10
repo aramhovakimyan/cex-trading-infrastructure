@@ -27,6 +27,11 @@ void DepthSynchronizer::run() {
         auto snapshot = DepthSnapshotClient::fetch(symbol_);
 
         if (!snapshot) {
+            if (updates_.is_closed()) {
+                std::cerr << "Update queue closed. Stopping synchronizer.\n";
+                return;
+            }
+
             std::cerr << "Snapshot request failed. Retrying...\n";
             std::this_thread::sleep_for(2s);
             continue;

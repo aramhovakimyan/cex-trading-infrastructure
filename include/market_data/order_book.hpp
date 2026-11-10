@@ -7,6 +7,7 @@
 #include <string>
 #include <functional>
 #include <cstddef>
+#include <vector>
 
 namespace trading {
 
